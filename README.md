@@ -1,6 +1,6 @@
 ## opencode-discord
 #### discord bot that connects to a hosted opencode server 
-#### i have speciic obsidan folder in theres a long running opencode session so it basically takes any of the arbitrary link,artifacts or blog summerize then put those in obsidian-vault and push to gh basically works as my agent's memory 
+#### i have speciic obsidan folder in my hetzner vps inside that theres a long running opencode server so it basically takes any of the arbitrary link,artifacts or blog thru discord bot as a proxy then summerize put those in obsidian-vault with proper indexing and push to gh basically works as my agent's memory 
 
 To install dependencies:
 
