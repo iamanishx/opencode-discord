@@ -17,7 +17,13 @@ const headers = {
 };
 
 type Msg = {
-  info: { id: string; role?: string; finish?: string };
+  info: {
+    id: string;
+    role?: string;
+    finish?: string;
+    parentID?: string;
+    time?: { created?: number };
+  };
   parts: Array<{ type: string; text?: string }>;
 };
 
@@ -33,6 +39,13 @@ function log(level: string, msg: string, data?: Record<string, unknown>) {
 
 function mid(prefix: string) {
   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function status(): Promise<string> {
+  const res = await fetch(`${OPENCODE_URL}/session/status`, { headers });
+  if (!res.ok) return "unknown";
+  const data = (await res.json()) as Record<string, { type: string }>;
+  return data[OPENCODE_SESSION]?.type ?? "idle";
 }
 
 async function latest(): Promise<Msg[]> {
@@ -53,6 +66,7 @@ async function abort() {
 
 async function prompt(text: string): Promise<string> {
   await abort();
+  await Bun.sleep(500);
   const msgid = mid("msg");
   log("INFO", "sending prompt", { messageID: msgid, length: text.length });
 
@@ -80,48 +94,67 @@ async function prompt(text: string): Promise<string> {
   return msgid;
 }
 
-async function reply(msgid: string, timeout = 180_000): Promise<string> {
-  log("INFO", "waiting for response", { parentID: msgid });
+async function reply(timeout = 300_000): Promise<string> {
+  log("INFO", "waiting for session to finish");
   const start = Date.now();
   let poll = 0;
+  let saw = false;
 
   while (Date.now() - start < timeout) {
     await Bun.sleep(2000);
     poll++;
 
-    const msgs = await latest();
-    const msg = msgs.find(
-      (m) =>
-        m.info.role === "assistant" &&
-        (m.info as { parentID?: string }).parentID === msgid &&
-        m.info.finish,
-    );
+    const s = await status();
 
-    if (msg) {
-      const text = msg.parts
+    if (s === "busy") {
+      saw = true;
+      if (poll % 15 === 0)
+        log("INFO", "session busy", {
+          polls: poll,
+          elapsed: Date.now() - start,
+        });
+      continue;
+    }
+
+    if (s === "idle" && saw) {
+      log("INFO", "session idle, fetching final response", { polls: poll });
+      const msgs = await latest();
+      const last = msgs.find(
+        (m) => m.info.role === "assistant" && m.info.finish === "stop",
+      );
+
+      if (!last) {
+        log("WARN", "no finished assistant message found", {
+          msgs: msgs.map((m) => `${m.info.role}:${m.info.finish ?? "-"}`),
+        });
+        return "(no response)";
+      }
+
+      const text = last.parts
         .filter((p) => p.type === "text")
         .map((p) => p.text)
         .join("\n")
         .trim();
       log("INFO", "got response", {
-        id: msg.info.id,
+        id: last.info.id,
         length: text.length,
         polls: poll,
       });
-      return text || "(empty response)";
+      return text || "(no text in response)";
     }
 
-    if (poll % 10 === 0) {
-      const roles = msgs.map(
-        (m) =>
-          `${m.info.role}:${m.info.id.slice(-8)}:parent=${((m.info as { parentID?: string }).parentID ?? "-").slice(-8)}:finish=${m.info.finish ?? "-"}`,
-      );
-      log("INFO", "still waiting", {
+    if (s === "idle" && !saw) {
+      if (poll <= 3) continue;
+      log("WARN", "session never became busy", { polls: poll });
+      return "(session did not process the message)";
+    }
+
+    if (poll % 15 === 0)
+      log("INFO", "waiting", {
+        status: s,
         polls: poll,
         elapsed: Date.now() - start,
-        msgs: roles,
       });
-    }
   }
 
   log("WARN", "timed out", { timeout, polls: poll });
@@ -159,16 +192,23 @@ client.on("messageCreate", async (msg) => {
     channel: msg.channelId,
     text: text.slice(0, 100),
   });
+
+  const typing = setInterval(
+    () => msg.channel.sendTyping().catch(() => {}),
+    8000,
+  );
   await msg.channel.sendTyping();
 
   try {
-    const msgid = await prompt(text);
-    const answer = await reply(msgid);
+    await prompt(text);
+    const answer = await reply();
+    clearInterval(typing);
     const chunks = answer.match(/[\s\S]{1,2000}/g) ?? ["(empty)"];
     log("INFO", "replying", { chunks: chunks.length, length: answer.length });
     for (const chunk of chunks) await msg.reply(chunk);
     log("INFO", "sent", { user: msg.author.tag });
   } catch (err) {
+    clearInterval(typing);
     log("ERROR", "failed", { error: String(err), user: msg.author.tag });
     await msg.reply(`Error: ${err}`);
   }
